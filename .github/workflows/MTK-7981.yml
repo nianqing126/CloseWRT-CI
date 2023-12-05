@@ -4,7 +4,7 @@ name: MTK-7981
 on:
   #自动编译：每天早上4点
   schedule:
-    - cron: 0 25 * * *
+    - cron: 10 9 * * *
   #手动编译
   workflow_dispatch:
 
