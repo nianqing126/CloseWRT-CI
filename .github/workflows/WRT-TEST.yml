@@ -15,7 +15,7 @@ on:
         type: choice
         options:
           - MT7981
-          - MT7986
+          #- MT7986
           - TEST
       SOURCE:
         default: 'Yuzhii0718/immortalwrt-mt798x-6.6-padavanonly'
