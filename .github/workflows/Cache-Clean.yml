@@ -17,10 +17,24 @@ env:
 
 jobs:
   cleanup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Projects
         uses: actions/checkout@main
 
       - name: Cache Clean
-        run: gh cache delete --all
+        run: |
+          # gh cache delete --all 在「当前没有任何 cache」时返回非 0（实测 run
+          # 45536454606 因此整条 workflow 变红），但那恰恰是目标状态，不是失败。
+          # 区分两种情况：有 cache 删掉了才算成功，没有 cache 也算成功；
+          # 真正的权限/网络错误仍要暴露出来。
+          out=$(gh cache delete --all 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "cache 已清空"
+          elif echo "$out" | grep -qiE 'no cach|not found|nothing to delete'; then
+            echo "没有 cache 可删（目标状态），视为成功"
+          else
+            echo "::error title=Cache Clean 失败::gh exit $rc"
+            exit "$rc"
+          fi

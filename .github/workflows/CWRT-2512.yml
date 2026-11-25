@@ -45,7 +45,7 @@ jobs:
   # 25.12 的 tag 形如 CPE-chasey-dev-25.12-<date> / MT7981-25.12-chasey-dev-25.12-<date>，
   # 统一含子串 'chasey-dev-25.12'，据此精确清理。
   cleanup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
       GH_REPO: ${{github.repository}}

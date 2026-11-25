@@ -80,46 +80,146 @@ jobs:
     #   libyaml-dev/libgc-dev 类头文件 -> 常见构建依赖
     #   python3-pip/python3-ply/python3-requests/python3-docutils/libpython3-dev
     #   p7zip/p7zip-full/lrzsz/sharutils/subversion/quilt/re2c/xxd -> 打包与补丁工具
-    runs-on: ubuntu-latest
+    # 【runner 固定 Ubuntu 24.04，不要用 ubuntu-latest】
+    # 对齐 V-OWRT-CI 4a63a0c 的实测结论：同一份 workflow、同一个 Update Feeds
+    # 步骤，ubuntu-24.04 上 1.1 分钟，ubuntu-26.04 上 29.2 分钟（26 倍），
+    # 会撞步骤超时把整条流水线拖死。GitHub 已于 2026-10 把 ubuntu-latest
+    # 提升到 26.04，继续用 latest 等于默认踩这个坑。
+    # 24.04 是目前唯一有完整成功记录的基线（25 步全过、70 分钟一次通过）。
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Projects
         uses: actions/checkout@main
 
-      - name: Initialization Environment
+      # ═══════════════════════════════════════════════════════════════════
+      # 环境初始化拆成 4 步（对齐 V-OWRT-CI e959620/43ff627/9df07ba/4a63a0c）。
+      # 原来的一体化步骤有三个真实问题：
+      #   1) full-upgrade 在容器化 runner 上会尝试升级 systemd 等核心包，
+      #      无法重启服务 → 命令永久挂起；
+      #   2) purge firefox 会触发 snapd 操作，在 runner 里极易卡死；
+      #   3) apt-get install 一个包名对不上就整体 exit 2，而包名随发行版漂移
+      #      （24.04 起 p7zip 由 7zip 承接、libz-dev 在 Ubuntu 侧不存在），
+      #      硬列表一旦遇到漂移就把流水线拖垮，报错只有一句 exit code 2。
+      # 拆分后每步独立超时、独立告警，且依赖安装先探测再装。
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Initialization Environment · 释放磁盘
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get -yqq purge firefox
-          sudo apt-get -yqq update
-          sudo apt-get -yqq full-upgrade
-          sudo apt-get -yqq autoremove --purge
-          sudo apt-get -yqq autoclean
-          sudo apt-get -yqq clean
+          # Ubuntu runner 镜像预装 android(~10G)/ghc(~5G)/dotnet(~2.5G)/
+          # CodeQL(~5G)/boost(~1G) 合计约 23GB，构建完全用不到。不清理时可用
+          # 空间仅约 30GB，而 MTK-CPE 这类目标需 20-25GB（dl 3.8GB 其中单个
+          # go-mod-cache 就 1.9GB；build_dir+staging 15-20GB），会在
+          # Download Packages / Compile Firmware 阶段把磁盘写满。
+          df -h /
+          timeout 300 sudo rm -rf /usr/local/lib/android \
+            /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/lib/node_modules \
+            /opt/google/chrome || echo "::warning::清理预装组件超时或被跳过"
+          echo "=== 清理后 ==="; df -h /
 
-          # 上游 ffc0a6d 的列表 + 补齐官方脚本中缺失的包（见上方注释）
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential bzip2 ca-certificates ccache clang \
-            cmake cpio curl device-tree-compiler dos2unix file flex \
-            g++-multilib gawk gcc-multilib genisoimage gettext git jq \
-            libbpf-dev libclang-dev libdw-dev libelf-dev libncurses-dev libssl-dev lld \
-            llvm ninja-build patch perl pkgconf python3 python3-cryptography \
-            python3-dev python3-packaging python3-pyelftools python3-setuptools qemu-utils rsync swig \
-            unzip wget xz-utils zlib1g-dev zstd \
-            squashfs-tools libfuse-dev haveged \
-            autoconf automake autopoint binutils fakeroot libtool libltdl-dev \
-            re2c quilt pkg-config libglib2.0-dev libz-dev libreadline-dev \
-            libgmp3-dev libmpc-dev libmpfr-dev libyaml-dev libc6-dev-i386 \
-            p7zip p7zip-full lrzsz sharutils subversion m4 xxd \
-            python3-pip python3-ply python3-requests python3-docutils \
-            libpython3-dev nano vim texinfo xmlto help2man intltool gperf
+      - name: Initialization Environment · apt 索引
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # 不执行 full-upgrade：它会尝试升级 systemd 等核心包，容器化 runner
+          # 无法重启这些服务，命令永久挂起。
+          # 不执行 autoremove --purge：无 upgrade 的环境里同样可能长时间锁包。
+          # 不执行 purge firefox：Ubuntu 的 firefox 是 snap 包，purge 会触发
+          # snapd 操作，在 runner 容器里极易卡死，且清理它对构建毫无收益。
+          timeout 420 sudo apt-get -yqq update \
+            || echo "::warning::apt update 超时或失败，继续尝试安装依赖"
+          timeout 120 sudo apt-get -yqq clean || true
+          timeout 120 sudo apt-get -yqq autoclean || true
 
-          sudo timedatectl set-timezone "Asia/Shanghai"
+      - name: Initialization Environment · 安装依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # 上游 ffc0a6d 用本列表替代了 immortalwrt 官方 init_build_environment.sh，
+          # 但该列表不完整（低于官方脚本），缺失会导致编译在后期才失败。
+          # 以下包为对比官方脚本后补回：
+          #   squashfs-tools  -> 无 mksquashfs 则无法生成 squashfs 固件
+          #   libfuse-dev     -> squashfs 相关构建需要
+          #   haveged         -> 提供熵源，避免 Go/Rust 编译因熵不足卡住
+          #   autoconf/automake/binutils/fakeroot/libtool 等 -> 大量包 configure 依赖
+          #   libz-dev/libglib2.0-dev/libreadline-dev 等 -> 常见构建期头文件
+          #   p7zip/p7zip-full/lrzsz/sharutils/subversion/xxd -> 打包与脚本工具
+          #
+          # ── 逐包探测再安装，不要直接硬装 ──
+          # apt-get install 只要有一个包名对不上就整体失败（exit 2），而包名在
+          # 发行版之间会漂移：Ubuntu 24.04 起 p7zip 由 7zip 承接、libz-dev 在
+          # Ubuntu 侧不存在（只有 zlib1g-dev）。先探测每个包有没有实际候选版本，
+          # 缺失的跳过并告警，只把能装的交给 apt。
+          PKGS="bc bison build-essential bzip2 ca-certificates ccache clang cmake cpio curl device-tree-compiler dos2unix file flex g++-multilib gawk gcc-multilib genisoimage gettext git jq libbpf-dev libclang-dev libdw-dev libelf-dev libncurses-dev libssl-dev lld llvm ninja-build patch perl pkgconf python3 python3-cryptography python3-dev python3-packaging python3-pyelftools python3-setuptools qemu-utils rsync swig unzip wget xz-utils zlib1g-dev zstd squashfs-tools libfuse-dev haveged autoconf automake autopoint binutils fakeroot libtool libltdl-dev re2c quilt pkg-config libglib2.0-dev libz-dev libreadline-dev libgmp3-dev libmpc-dev libmpfr-dev libyaml-dev libc6-dev-i386 p7zip p7zip-full lrzsz sharutils subversion m4 xxd python3-pip python3-ply python3-requests python3-docutils libpython3-dev nano vim texinfo xmlto help2man intltool gperf"
+          MISSING=""
+          AVAIL=""
+          for p in $PKGS; do
+            if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+              AVAIL="$AVAIL $p"
+            else
+              MISSING="$MISSING $p"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::warning title=依赖包跳过::当前发行版无可用版本:$MISSING"
+          fi
 
-          sudo -E systemctl daemon-reload
+          # ── 只装尚未安装的包 ──
+          # Ubuntu runner 镜像已预装 llvm/clang/lld/build-essential 等一大批工具。
+          # 对已安装的包再次 apt-get install 会触发 aptitude 检查与可能的升级下载，
+          # 在慢速 runner 上实测能把这一步从 1 分钟拖到 25 分钟以上。
+          TO_INSTALL=""
+          ALREADY=0
+          for p in $AVAIL; do
+            if dpkg -s "$p" >/dev/null 2>&1; then
+              ALREADY=$((ALREADY+1))
+            else
+              TO_INSTALL="$TO_INSTALL $p"
+            fi
+          done
+          N=$(echo $TO_INSTALL | wc -w)
+          echo "包状态：已安装 $ALREADY 个，需要新装 $N 个"
+          echo "待装清单：$TO_INSTALL"
+          df -h /
 
+          # ── 不要在 apt 超时或非零退出时直接 exit 1 ──
+          # 实测同一份包列表在不同 runner 上耗时从 1-2 分钟到 27 分钟以上不等
+          # （llvm/clang/lld 合计 1-2GB，慢速 runner 上下载不完）。timeout 杀掉
+          # apt 时大部分包其实已经装好，直接判失败会让整条流水线白跑。
+          # 正确做法：超时/异常后修复 dpkg 状态，再由下面的关键工具校验决定成败。
+          apt_opts="-y --no-install-recommends -o Acquire::Retries=3 -o Acquire::http::Pipeline-Depth=10"
+          if [ "$N" -eq 0 ]; then
+            echo "所有依赖包均已预装，跳过 apt install"
+          elif ! timeout 2400 sudo apt-get install $apt_opts $TO_INSTALL; then
+            rc=$?
+            echo "::warning title=apt install 未正常结束::rc=$rc（124=2400s 超时），尝试修复 dpkg 状态后继续"
+            sudo dpkg --configure -a 2>/dev/null || true
+            sudo apt-get -yqq -f install 2>/dev/null || true
+            df -h /
+          fi
+
+          # 关键工具必须到位，否则要等到编译后期才暴露（那时已经烧掉半小时）。
+          # 这一步才是安装阶段真正的成败判据。
+          MISSING_CRIT=""
+          for c in mksquashfs gcc g++ make cmake ninja python3 rsync ccache \
+                   bison flex patch perl unzip wget xz; do
+            command -v "$c" >/dev/null 2>&1 || MISSING_CRIT="$MISSING_CRIT $c"
+          done
+          if [ -n "$MISSING_CRIT" ]; then
+            echo "::error title=关键工具缺失::构建必需但未安装:$MISSING_CRIT"
+            df -h /
+            exit 1
+          fi
+          echo "关键工具校验通过"
+
+      - name: Initialization Environment · 时区与目录
+        run: |
+          sudo timedatectl set-timezone "Asia/Shanghai" \
+            || echo "::warning::设置时区失败（不影响构建）"
           sudo mkdir -p /mnt/build_wrt
           sudo chown $USER:$USER /mnt/build_wrt
-          sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
+          sudo ln -sfn /mnt/build_wrt $GITHUB_WORKSPACE/wrt
 
       - name: Initialization Values
         run: |
@@ -205,7 +305,16 @@ jobs:
             fi
           fi
 
-          ./scripts/feeds update -a
+          # 给 feeds 操作加超时与时间戳。feeds.conf.default 里有 7 个 feed 仓库，
+          # 合计约 600MB。GitHub runner 与 GitHub 同机房，正常 2-5 分钟；但单个
+          # 仓库响应慢时会无限等待 —— 实测该步骤曾卡 23 分钟以上且没有任何超时
+          # 保护，整条流水线就此挂住（对齐 V-OWRT-CI 1074aa5）。
+          echo "=== feeds update -a 开始 $(date +%T) ==="
+          timeout 1800 ./scripts/feeds update -a || {
+            rc=$?
+            echo "::warning title=feeds update -a::退出码 $rc（124=1800s 超时），继续后续步骤"
+          }
+          echo "=== feeds update -a 结束 $(date +%T) ==="
 
           # 修正上游 QModem feed 的【目录名 != PKG_NAME】问题。
           # feeds/package 扫描用【目录名】注册包，但 Makefile 的 DEPENDS /
@@ -401,10 +510,31 @@ jobs:
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
+        # 步骤级硬超时（GitHub 原生）。这一层无论如何都要有：即使脚本内部的
+        # timeout 失效、或有子进程持有 stdout 让步骤永不结束，也一定会被 runner
+        # 强制终止，不会一路挂到 job 的 360 分钟上限（对齐 V-OWRT-CI 3e8a92f）。
+        timeout-minutes: 150
         run: |
+          echo "=== 下载前磁盘 ==="; df -h /
           cd ./wrt/
 
-          make download -j$(nproc)
+          # 这一步会编译 host tools + 交叉工具链，4 核 runner 上约 90-120 分钟，
+          # 属固有成本；内部 timeout 只用于真正卡死时兜底。
+          timeout -k 30 9000 make download -j$(nproc) || {
+            rc=$?
+            echo "::warning title=make download 未正常结束::退出码 $rc（124=超时，137/143=被强杀）"
+            df -h /
+          }
+
+          # ── 收尾：等子进程自己结束 ──
+          # 绝不要在这里用 `pkill -f <含 curl|wget 的正则>`：脚本全文都在执行它的
+          # bash 的 /proc/PID/cmdline 里，而正则参数本身又含 curl/wget 字样，
+          # pkill -f 会匹配到自己并自杀，整个步骤以 exit -15 结束（V-OWRT-CI bcfacdb）。
+          wait 2>/dev/null || true
+          sleep 2
+
+          echo "=== 下载后磁盘 ==="; df -h /
+          echo "dl 目录文件数: $(ls dl 2>/dev/null | wc -l)"
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
