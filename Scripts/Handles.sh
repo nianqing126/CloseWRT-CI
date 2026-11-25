@@ -611,3 +611,33 @@ if [ -d "package/luci-theme-vantage" ]; then
 		echo "theme-vantage fix failed; continuing!"
 	fi
 fi
+
+# ═══════════════════════════════════════════════════════════════════════
+# hnat-detect 的 DEPENDS 写的是虚拟包 +ip，而 iproute2 有两个都 PROVIDES ip
+# 的变体：ip-tiny（DEFAULT_VARIANT:=1）与 ip-full，二者互相 CONFLICTS。
+#
+# opkg（24.10）不校验这种冲突，能装过去；apk（25.12）严格校验，package/install
+# 阶段直接失败（run 42540197897）：
+#   ERROR: unable to select packages:
+#     ip-tiny-6.18.0-r2:
+#       conflicts: ip-full-6.18.0-r2[ip=6.18.0-r2]
+#       satisfies: world[ip-tiny] hnat-detect-1-r2[ip-tiny]
+#     ip-full-6.18.0-r2:
+#       conflicts: ip-tiny-6.18.0-r2[ip=6.18.0-r2]
+#       satisfies: world[ip-full] luci-app-tailscale-community[ip-full]
+#                  mihomo-meta[ip-full] momo[ip-full] nikki[ip-full]
+#
+# Config/GENERAL.txt 显式要 ip-full（mihomo/nikki/momo/tailscale 均依赖它），
+# 因此正确解法是让 hnat-detect 也指名 ip-full，而不是把 +ip 解析成默认的
+# ip-tiny。ip-full 是 ip-tiny 的超集，功能无损。
+# 幂等：模式 ' +ip +firewall4' 不会匹配已改写的 ' +ip-full +firewall4'。
+# ═══════════════════════════════════════════════════════════════════════
+HNAT_MK="package/mtk/applications/hnat-detect/Makefile"
+if [ -f "$HNAT_MK" ]; then
+	if grep -q ' +ip +firewall4' "$HNAT_MK"; then
+		sed -i 's/ +ip +firewall4/ +ip-full +firewall4/' "$HNAT_MK"
+		echo "hnat-detect: DEPENDS +ip -> +ip-full (apk 严格校验 ip 变体冲突)"
+	else
+		echo "hnat-detect: DEPENDS 已指名 ip 变体或未命中; skip"
+	fi
+fi
