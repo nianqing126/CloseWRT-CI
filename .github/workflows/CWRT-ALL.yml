@@ -87,10 +87,10 @@ jobs:
             SOURCE: "Yuzhii0718/immortalwrt-mt798x-6.6-padavanonly"
             BRANCH: "openwrt-24.10-6.6"
             LABEL: "MT7981-24.10-6.6"
-          - CONFIG: "CPE"
-            SOURCE: "Yuzhii0718/immortalwrt-mt798x-6.6-padavanonly"
-            BRANCH: "openwrt-24.10-6.6"
-            LABEL: "CPE-24.10-6.6"
+         # - CONFIG: "CPE"
+         #   SOURCE: "Yuzhii0718/immortalwrt-mt798x-6.6-padavanonly"
+         #   BRANCH: "openwrt-24.10-6.6"
+         #   LABEL: "CPE-24.10-6.6"
 
     #调用公用编译核心WRT-CORE.yml
     uses: ./.github/workflows/WRT-CORE.yml
