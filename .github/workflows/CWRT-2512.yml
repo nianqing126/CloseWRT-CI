@@ -94,7 +94,7 @@ jobs:
             SOURCE: "chasey-dev/immortalwrt-mt798x-rebase"
             BRANCH: "25.12"
             LABEL: "MT7981-25.12"
-          - CONFIG: "CPE"
+          - CONFIG: "MT7981"
             SOURCE: "chasey-dev/immortalwrt-mt798x-rebase"
             BRANCH: "25.12"
             LABEL: "CPE-25.12"
